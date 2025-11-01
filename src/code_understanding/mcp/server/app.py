@@ -5,6 +5,7 @@ Core MCP server implementation using FastMCP.
 import logging
 import sys
 import asyncio
+from pathlib import Path
 import click
 from typing import List, Optional
 
@@ -23,12 +24,20 @@ logging.basicConfig(
 logger = logging.getLogger("code_understanding.mcp")
 
 
+_INSTRUCTIONS_PATH = Path(__file__).parent / "server_instructions.txt"
+_SERVER_INSTRUCTIONS = (
+    _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    if _INSTRUCTIONS_PATH.exists()
+    else None
+)
+
+
 def create_mcp_server(config: ServerConfig = None) -> FastMCP:
-    """Create and configure the MCP server instance"""
+    """Create and configure the MCP server instance."""
     if config is None:
         config = load_config()
 
-    server = FastMCP(name=config.name)
+    server = FastMCP(name=config.name, instructions=_SERVER_INSTRUCTIONS)
 
     # Initialize core components
     repo_manager = RepositoryManager(config.repository)
@@ -47,48 +56,52 @@ def register_tools(
 ) -> None:
     """Register all MCP tools with the server."""
 
-    @mcp_server.tool(
-        name="get_repo_file_content",
-        description="""Retrieve file contents or directory listings from a repository. For files, returns the complete file content. For directories, returns a non-recursive listing of immediate files and subdirectories.
-
-PARAMETER GUIDANCE:
-- repo_path: (Required) MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-- resource_path: (Optional) Path to the target file or directory within the repository. If not provided, it defaults to the repository's root directory.""",
-    )
+    @mcp_server.tool(name="get_repo_file_content")
     async def get_repo_file_content(repo_path: str, resource_path: Optional[str] = None, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
-        """
-        Retrieve file contents or directory listings from a repository.
+        """Retrieve file contents or list directory entries from a cached repository.
 
-        Args:
-            repo_path (str): Path or URL to the repository
-            resource_path (str, optional): Path to the target file or directory within the repository. Defaults to the repository root if not provided.
-            branch (str, optional): Specific branch to read from (only used with per-branch cache strategy)
-            cache_strategy (str, optional): Cache strategy - "shared" (default) or "per-branch"
+        Usage overview
+        --------------
+        1. Start with :func:`list_repository_branches` to discover cached entries and reuse the
+           existing ``cache_strategy``/``branch`` pairing when available.
+        2. Call :func:`refresh_repo` to pull the latest commits or :func:`clone_repo` if no cache
+           exists yet.
+        3. Invoke this tool with matching ``repo_path``/``branch``/``cache_strategy`` to fetch
+           file text or a directory listing.
+        4. Handle ``{"status": "error"}`` responses that indicate the repository is missing,
+           cloning, or failed to refresh. See **Repository Discovery & Preparation** in the server
+           instructions for prerequisite details.
 
-        Returns:
-            dict: For files:
-                {
-                    "type": "file",
-                    "path": str,  # Relative path within repository
-                    "content": str,  # Complete file contents
-                    "branch": str,  # Current branch name
-                    "cache_strategy": str  # Cache strategy used
-                }
-                For directories:
-                {
-                    "type": "directory",
-                    "path": str,  # Relative path within repository
-                    "contents": List[str],  # List of immediate files and subdirectories
-                    "branch": str,  # Current branch name
-                    "cache_strategy": str  # Cache strategy used
-                }
+        Parameters
+        ----------
+        repo_path:
+            Exact identifier originally supplied to :func:`clone_repo`. A mismatched string returns
+            ``{"status": "error", "error": "Repository not found..."}``.
+        resource_path:
+            Relative path inside the repository. Defaults to ``"."`` (repository root) when
+            omitted.
+        branch:
+            Target branch when ``cache_strategy == "per-branch"``. Ignored for shared caches.
+        cache_strategy:
+            ``"shared"`` (default) or ``"per-branch"``; must match the strategy used during the
+            initial clone.
 
-        Note:
-            Directory listings are not recursive - they only show immediate contents.
-            To explore subdirectories, make additional calls with the subdirectory path.
+        Responses
+        ---------
+        * File payload – ``{"type": "file", "path": <relative path>, "content": <text>,
+          "branch": <str>, "cache_strategy": <str>}``.
+        * Directory payload – ``{"type": "directory", "path": <relative path>, "contents":
+          [<entries>], "branch": <str>, "cache_strategy": <str>}``.
+        * Error payload – ``{"status": "error", "error": <message>}`` for cache misses,
+          incomplete clones, or unexpected failures.
+
+        Notes
+        -----
+        * Directory results are not recursive; call again with a child ``resource_path`` to drill
+          down.
+        * File contents are returned verbatim without pagination. Consider repository size when
+          fetching large binaries or generated files.
+        * Cross-reference the server instructions for cloning and cache-strategy expectations.
         """
         try:
             if resource_path is None:
@@ -136,47 +149,44 @@ PARAMETER GUIDANCE:
             logger.error(f"Error getting resource: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="refresh_repo",
-        description="""Update a previously cloned repository in MCP's cache with latest changes and trigger reanalysis. Use this to ensure analysis is based on latest code.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors""",
-    )
+    @mcp_server.tool(name="refresh_repo")
     async def refresh_repo(repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
-        """
-        Update a previously cloned repository in MCP's cache and refresh its analysis.
+        """Refresh a cached repository and restart analysis in the background.
 
-        For Git repositories, performs a git pull to get latest changes.
-        For local directories, copies the latest content from the source.
-        Then triggers a new repository map build to ensure all analysis is based on
-        the updated code.
+        Workflow
+        --------
+        1. Ensure the repository was previously cloned with the same ``cache_strategy``.
+        2. Call this tool to pull remote changes (Git) or recopy local sources into the cache.
+        3. The server triggers a fresh repository-map build. Poll :func:`get_source_repo_map`
+           until the returned ``status`` becomes ``"success"``.
 
-        Args:
-            repo_path (str): Path or URL matching what was originally provided to clone_repo
-            branch (str, optional): Specific branch to switch to during refresh
-            cache_strategy (str, optional): Cache strategy - must match original clone strategy
+        Parameters
+        ----------
+        repo_path:
+            Identifier originally passed to :func:`clone_repo`.
+        branch:
+            Optional branch to check out after refresh. Required when working with a
+            ``per-branch`` cache entry different from the active branch.
+        cache_strategy:
+            ``"shared"`` (default) or ``"per-branch"``; must match the initial clone. The server
+            validates this before attempting an update.
 
-        Returns:
-            dict: Response with format:
-                {
-                    "status": str,  # "pending", "switched_branch", "error"
-                    "path": str,    # (On pending) Cache location being refreshed
-                    "message": str, # (On pending) Status message
-                    "error": str    # (On error) Error message
-                    "cache_strategy": str  # Strategy used for caching
-                }
+        Response schema
+        ---------------
+        ``{"status": "pending", "path": <cache path>, "message": <str>, "cache_strategy": <str>}``
+            Refresh accepted and the analysis rebuild is running asynchronously.
+        ``{"status": "switched_branch", "path": <cache path>, "message": <str>, "cache_strategy": <str>, "current_branch": <str>, "previous_branch": <str>}``
+            The cache switched branches before kicking off analysis.
+        ``{"status": "error", "error": <message>, "cache_strategy": <str>}``
+            Validation or refresh failed; no analysis rebuild is scheduled.
 
-        Note:
-            - Repository must be previously cloned and have completed initial analysis
-            - Updates MCP's cached copy, does not modify the source repository
-            - Automatically triggers rebuild of repository map with updated files
-            - If branch is specified, switches to that branch after pulling latest changes
-            - cache_strategy should match the strategy used during original clone
-            - Operation runs in background, check get_repo_map_content for status
+        Notes
+        -----
+        * The source repository is never mutated; only the cached copy is updated.
+        * Refreshes may take time for large histories. If the client times out, re-poll
+          :func:`get_source_repo_map` or :func:`list_repository_branches` to confirm completion.
+        * See the server instructions section **Refresh & Analysis Lifecycle** for end-to-end
+          polling guidance.
         """
         try:
             # Validate cache_strategy
@@ -188,45 +198,39 @@ REQUIRED PARAMETER GUIDANCE:
             logger.error(f"Error refreshing repository: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="list_repository_branches",
-        description="List all cached versions of a repository across different branches. Shows information about each cached branch including paths, strategies, and metadata.",
-    )
+    @mcp_server.tool(name="list_repository_branches")
     async def list_repository_branches(repo_url: str) -> dict:
-        """
-        List all cached versions of a repository across different branches.
+        """Enumerate cached branches and analysis statuses for a repository URL.
 
-        This tool scans the MCP cache to find all entries for a given repository URL,
-        showing both shared and per-branch cache entries. Useful for understanding
-        what branches are available and their current status.
+        Parameters
+        ----------
+        repo_url:
+            Exact URL/path previously supplied to :func:`clone_repo`.
 
-        Args:
-            repo_url (str): Repository URL to search for (must match exact URL used in clone_repo)
+        Response schema
+        ---------------
+        ``{"status": "success", "repo_url": <str>, "cached_branches": [...], "total_cached": <int>}``
+            * ``cached_branches`` entries expose:
+              - ``requested_branch`` – branch passed to :func:`clone_repo`.
+              - ``current_branch`` – branch currently checked out in the cache (for shared caches
+                this may differ from ``requested_branch`` after refresh operations).
+              - ``cache_path`` – fully qualified cache location on disk.
+              - ``cache_strategy`` – ``"shared"`` or ``"per-branch"``.
+              - ``last_access`` – ISO timestamp of the most recent tool interaction.
+              - ``clone_status`` – ``{"status": "cloning"|"complete"|"error", "message": <str>,
+                "updated_at": <iso>}``.
+              - ``repo_map_status`` – ``{"status": "building"|"waiting"|"success"|"error"|"threshold_exceeded", "message": <str>, "updated_at": <iso>}``.
+        ``{"status": "error", "error": <message>}``
+            Provided when the repository has never been cloned or when metadata cannot be read.
 
-        Returns:
-            dict: Response with format:
-                {
-                    "status": "success" | "error",
-                    "repo_url": str,  # Repository URL searched
-                    "cached_branches": [  # List of cached branch entries
-                        {
-                            "requested_branch": str,  # Branch that was requested during clone
-                            "current_branch": str,    # Current active branch in the cache
-                            "cache_path": str,        # File system path to cached repository
-                            "cache_strategy": str,    # "shared" or "per-branch"
-                            "last_access": str,       # ISO timestamp of last access
-                            "clone_status": dict,     # Clone operation status
-                            "repo_map_status": dict   # Repository map build status
-                        }
-                    ],
-                    "total_cached": int  # Total number of cached entries found
-                }
-
-        Note:
-            - Only returns repositories that have been cloned via clone_repo
-            - Useful for PR review workflows to see all available branch versions
-            - Shows both active and completed cache entries
-            - Helps identify which cache strategy was used for each entry
+        Usage notes
+        -----------
+        * Use this tool before switching branches so you can reuse an existing cache entry instead
+          of recloning.
+        * Pairs naturally with :func:`refresh_repo` and :func:`get_source_repo_map` to monitor
+          long-running analysis work.
+        * Refer to the server instructions section **Cache Directory Layout & Branch Handling** for
+          guidance on interpreting shared vs. per-branch entries.
         """
         try:
             return await repo_manager.list_repository_branches(repo_url)
@@ -234,42 +238,46 @@ REQUIRED PARAMETER GUIDANCE:
             logger.error(f"Error listing repository branches: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="clone_repo",
-        description="Clone a repository into the MCP server's analysis cache and initiate background analysis. Required before using other analysis endpoints like get_source_repo_map.",
-    )
+    @mcp_server.tool(name="clone_repo")
     async def clone_repo(url: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
-        """
-        Clone a repository into MCP server's cache and prepare it for analysis.
+        """Clone or copy a repository into the MCP cache and kick off analysis.
 
-        This tool must be called before using analysis endpoints like get_source_repo_map
-        or get_repo_documentation. It copies the repository into MCP's cache and
-        automatically starts building a repository map in the background.
+        Operational sequence
+        --------------------
+        1. Provide a ``url`` or local path and select a cache strategy.
+        2. The server clones (Git) or copies (filesystem) the repository into its cache.
+        3. A repository map build begins automatically. Poll :func:`get_source_repo_map` for
+           progress updates.
 
-        Args:
-            url (str): URL of remote repository or path to local repository to analyze
-            branch (str, optional): Specific branch to clone for analysis
-            cache_strategy (str, optional): Cache strategy - "shared" (default) or "per-branch"
-                - "shared": One cache entry per repo, switch branches in place
-                - "per-branch": Separate cache entries for each branch (useful for PR reviews)
+        Parameters
+        ----------
+        url:
+            Remote Git URL or local path to analyze. This exact string becomes the canonical
+            ``repo_path`` for all subsequent tools.
+        branch:
+            Branch to check out immediately after cloning. Defaults to ``"main"`` if omitted.
+        cache_strategy:
+            ``"shared"`` (single cache entry reused for every branch) or ``"per-branch"`` (dedicated
+            cache per branch, recommended for PR/feature review workflows).
 
-        Returns:
-            dict: Response with format:
-                {
-                    "status": "pending" | "already_cloned" | "switched_branch" | "error",
-                    "path": str,  # Cache location where repo is being cloned
-                    "message": str,  # Status message about clone and analysis
-                    "cache_strategy": str,  # Strategy used for caching
-                    "current_branch": str,  # (if applicable) Current active branch
-                    "previous_branch": str,  # (if switched) Previous branch name
-                }
+        Response schema
+        ---------------
+        ``{"status": "pending", "path": <cache path>, "message": <str>, "cache_strategy": <str>, "current_branch": <str>}``
+            Clone/copy accepted and analysis is running in the background.
+        ``{"status": "already_cloned", "path": <cache path>, "message": <str>, "cache_strategy": <str>, "current_branch": <str>}``
+            Cache entry already existed; the server reused it and kept the active branch.
+        ``{"status": "switched_branch", "path": <cache path>, "message": <str>, "cache_strategy": <str>, "current_branch": <str>, "previous_branch": <str>}``
+            Shared cache reused after switching branches in place.
+        ``{"status": "error", "error": <message>, "cache_strategy": <str>}``
+            Clone failed; no analysis will start.
 
-        Note:
-            - This is a setup operation for MCP analysis only
-            - Does not modify the source repository
-            - Repository map building starts automatically after clone completes
-            - Use get_source_repo_map to check analysis status and retrieve results
-            - Per-branch strategy allows simultaneous access to different branches
+        Notes
+        -----
+        * The source repository is read-only—no pushes or commits are performed by the server.
+        * Cloning can take time for large histories. If the client disconnects, re-run this tool to
+          receive the current status or check :func:`list_repository_branches`.
+        * See **Repository Discovery & Preparation** in the server instructions for
+          recommendations on choosing between shared and per-branch caches.
         """
         try:
             # Default branch to "main" if not provided
@@ -289,47 +297,7 @@ REQUIRED PARAMETER GUIDANCE:
             logger.error(f"Error cloning repository: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="get_source_repo_map",
-        description="""Retrieve a semantic analysis map of the repository's source code structure, including file hierarchy, functions, classes, and their relationships. Repository must be previously cloned via clone_repo.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Status Types:
-- "threshold_exceeded": Indicates analysis scope exceeds processing limits
-- "building": Analysis in progress
-- "waiting": Waiting for prerequisite operation
-- "success": Analysis complete
-- "error": Operation failed
-
-2. Resource Management:
-- Repository size impacts processing time and token usage
-- 'max_tokens' parameter provides approximate control of response size
-    Note: Actual token count may vary slightly above or below specified limit
-- File count threshold exists to prevent overload
-- Processing time scales with both file count and max_tokens
-    Important: Clients should adjust their timeout values proportionally when:
-    * Analyzing larger numbers of files
-    * Specifying higher max_tokens values
-    * Working with complex repositories
-
-3. Scope Control Options:
-- 'files': Analyze specific files. If only this is provided, the entire repository will be searched for matching file names.
-- 'directories': Analyze all source files within specific directories.
-- If BOTH 'files' and 'directories' are provided, the tool will perform an INTERSECTION, analyzing only the files named in 'files' that are also located within the specified 'directories'.
-
-4. Response Metadata:
-- Contains processing statistics and limitation details
-- Provides override_guidance when thresholds are exceeded
-- Reports excluded files and completion status
-
-NOTE: This tool supports both broad and focused analysis strategies. Response handling can be adapted based on specific use case requirements and user preferences.""",
-    )
+    @mcp_server.tool(name="get_source_repo_map")
     async def get_source_repo_map(
         repo_path: str,
         directories: Optional[List[str]] = None,
@@ -338,41 +306,58 @@ NOTE: This tool supports both broad and focused analysis strategies. Response ha
         branch: Optional[str] = None,
         cache_strategy: str = "shared",
     ) -> dict:
-        """
-        Retrieve a semantic analysis map of the repository's code structure.
+        """Return the latest semantic repository map built for a cached project.
 
-        Returns a detailed map of the repository's structure, including file hierarchy,
-        code elements (functions, classes, methods), and their relationships. Can analyze
-        specific files/directories or the entire repository.
+        What it provides
+        ----------------
+        * Hierarchical summaries of files, classes, functions, and relationships.
+        * Metadata about excluded files, token budgets, and completion state.
+        * Status updates while background analysis is still running.
 
-        Args:
-            repo_path (str): Path or URL matching what was originally provided to clone_repo
-            files (List[str], optional): Specific files to analyze. If None, analyzes all files
-            directories (List[str], optional): Specific directories to analyze. If None, analyzes all directories
-            max_tokens (int, optional): Limit total tokens in analysis. Useful for large repositories
-            branch (str, optional): Specific branch to analyze (only used with per-branch cache strategy)
-            cache_strategy (str, optional): Cache strategy - "shared" (default) or "per-branch"
+        Parameters
+        ----------
+        repo_path:
+            Exact identifier used with :func:`clone_repo`.
+        directories:
+            Optional list of directory prefixes to include. When paired with ``files`` the tool
+            intersects both sets, returning only matching files inside the provided directories.
+        files:
+            Optional list of filenames (relative paths). When provided alone, any path match within
+            the repository is considered.
+        max_tokens:
+            Soft cap on the size of the textual map. Large limits increase processing time; consult
+            **Analysis Size Management** in the server instructions for recommended ranges.
+        branch:
+            Branch name when querying ``per-branch`` caches.
+        cache_strategy:
+            ``"shared"`` (default) or ``"per-branch"``; must align with the earlier clone.
 
-        Returns:
-            dict: Response with format:
-                {
-                    "status": str,  # "success", "building", "waiting", or "error"
-                    "content": str,  # Hierarchical representation of code structure
-                    "metadata": {    # Analysis metadata
-                        "excluded_files_by_dir": dict,
-                        "is_complete": bool,
-                        "max_tokens": int
-                    },
-                    "message": str,  # Present for "building"/"waiting" status
-                    "error": str     # Present for "error" status
-                }
+        Status values
+        -------------
+        ``success``
+            ``content`` contains the complete map and ``metadata["is_complete"]`` is ``True``.
+        ``building``
+            Analysis is running. ``message`` describes the stage. Call again later.
+        ``waiting``
+            The repository has been cloned but map construction has not started yet (e.g., queued).
+        ``threshold_exceeded``
+            Size or token thresholds prevented completion. ``metadata`` includes guidance for
+            narrowing scope.
+        ``error``
+            Analysis failed. Review the ``error`` field and consider recloning or refreshing.
 
-        Note:
-            - Repository must be previously cloned using clone_repo
-            - Initial analysis happens in background after clone
-            - Returns "building" status while analysis is in progress
-            - Content includes file structure, code elements, and their relationships
-            - For large repos, consider using max_tokens or targeting specific directories
+        Response payload
+        ----------------
+        ``{"status": <status>, "content": <str | None>, "metadata": {"excluded_files_by_dir": {...}, "is_complete": <bool>, "max_tokens": <int | None>, "token_budget_used": <int | None>}, "message": <str | None>, "error": <str | None>}``
+
+        Notes
+        -----
+        * The initial map build launches automatically after :func:`clone_repo`. Until it finishes
+          you will see ``building``/``waiting`` responses.
+        * For large monorepos, combine ``directories`` and ``files`` to scope the analysis before
+          raising ``max_tokens``.
+        * The server instructions outline strategies for refreshing stalled analyses and
+          interpreting ``threshold_exceeded`` guidance.
         """
         try:
             # DEBUG: Log the parameters received at MCP endpoint
@@ -396,59 +381,44 @@ NOTE: This tool supports both broad and focused analysis strategies. Response ha
                 "error": f"Unexpected error while getting repository context: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_structure",
-        description="""Retrieve directory structure and analyzable file counts for a repository to guide analysis decisions.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Directory Information:
-- Lists directories containing analyzable source code
-- Reports number of analyzable files per directory
-- Shows directory hierarchy
-- Indicates file extensions present in each location
-
-2. Usage:
-- Requires repository to be previously cloned via clone_repo
-- Helps identify main code directories
-- Supports planning targeted analysis
-- Shows where analyzable code is located
-
-NOTE: Use this tool to understand repository structure and choose which directories to analyze in detail.""",
-    )
+    @mcp_server.tool(name="get_repo_structure")
     async def get_repo_structure(
         repo_path: str, directories: Optional[List[str]] = None, include_files: bool = False,
         branch: Optional[str] = None, cache_strategy: str = "shared"
     ) -> dict:
-        """
-        Get repository structure information with optional file listings.
+        """Summarize directory structure and analyzable files within a cached repository.
 
-        Args:
-            repo_path: Path/URL matching what was provided to clone_repo
-            directories: Optional list of directories to limit results to
-            include_files: Whether to include list of files in response
+        Parameters
+        ----------
+        repo_path:
+            Identifier originally passed to :func:`clone_repo`.
+        directories:
+            Optional subset of directories to report. When omitted the entire repository is
+            scanned. Providing values reduces processing time on large projects.
+        include_files:
+            When ``True``, each directory entry includes a non-recursive list of file paths.
+        branch:
+            Branch name to inspect when the cache strategy is ``per-branch``.
+        cache_strategy:
+            ``"shared"`` or ``"per-branch"`` (default ``"shared"``). Must match the clone.
 
-        Returns:
-            dict: {
-                "status": str,
-                "message": str,
-                "directories": [{
-                    "path": str,
-                    "analyzable_files": int,
-                    "extensions": {
-                        "py": 10,
-                        "java": 5,
-                        "ts": 3
-                    },
-                    "files": [str]  # Only present if include_files=True
-                }],
-                "total_analyzable_files": int
-            }
+        Response schema
+        ---------------
+        ``{"status": "success", "directories": [...], "total_analyzable_files": <int>, "message": <str | None>}``
+            * Each directory entry contains:
+              - ``path`` – relative directory path.
+              - ``analyzable_files`` – count of files matching the server's analyzable extensions.
+              - ``extensions`` – mapping of extension → count.
+              - ``files`` – present only when ``include_files=True``.
+        ``{"status": "error", "error": <message>}``
+            Returned when the repository is missing, still cloning, or another failure occurs.
+
+        Notes
+        -----
+        * Use this tool to decide which directories to pass to :func:`get_source_repo_map` or
+          :func:`get_repo_critical_files`.
+        * See **Repository Discovery & Preparation** in the server instructions for cloning
+          prerequisites and branch-handling details.
         """
         try:
             # Delegate to the RepoMapBuilder service to handle all the details
@@ -463,44 +433,7 @@ NOTE: Use this tool to understand repository structure and choose which director
                 "error": f"Failed to get repository structure: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_critical_files",
-        description="""Identify and analyze the most structurally significant files in a repository to guide code understanding efforts.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Analysis Metrics:
-   - Calculates importance scores based on:
-     * Function count (weight: 2.0)
-     * Total cyclomatic complexity (weight: 1.5)
-     * Maximum cyclomatic complexity (weight: 1.2)
-     * Lines of code (weight: 0.05)
-   - Provides detailed metrics per file
-   - Ranks files by composite importance score
-
-2. Resource Management:
-   - Repository must be previously cloned via clone_repo
-   - Analysis performed on-demand using Lizard
-   - Efficient for both small and large codebases
-   - Supports both full-repo and targeted analysis
-
-3. Scope Control Options:
-   - 'files': Analyze specific files. If only this is provided, the entire repository will be searched for matching file names.
-   - 'directories': Analyze all source files within specific directories.
-   - If BOTH 'files' and 'directories' are provided, the tool will perform an INTERSECTION, analyzing only the files named in 'files' that are also located within the specified 'directories'.
-   - 'limit': Control maximum results returned.
-
-4. Response Metadata:
-   - Total files analyzed
-   - Analysis completion status
-
-NOTE: This tool is designed to guide initial codebase exploration by identifying structurally significant files. Results can be used to target subsequent get_source_repo_map calls for detailed analysis.""",
-    )
+    @mcp_server.tool(name="get_repo_critical_files")
     async def get_repo_critical_files(
         repo_path: str,
         files: Optional[List[str]] = None,
@@ -510,34 +443,46 @@ NOTE: This tool is designed to guide initial codebase exploration by identifying
         branch: Optional[str] = None,
         cache_strategy: str = "shared",
     ) -> dict:
-        """
-        Analyze and identify the most structurally significant files in a codebase.
+        """Rank repository files by structural importance using complexity metrics.
 
-        Uses code complexity metrics to calculate importance scores, helping identify
-        files that are most critical for understanding the system's structure.
+        Parameters
+        ----------
+        repo_path:
+            Identifier originally provided to :func:`clone_repo`.
+        files:
+            Optional collection of file paths to evaluate. When combined with ``directories`` the
+            tool analyzes only files matching both filters.
+        directories:
+            Optional list of directory prefixes. When omitted, the entire repository is scanned.
+        limit:
+            Maximum number of ranked results to return (default ``50``). Use lower values to focus on
+            the highest-impact files.
+        include_metrics:
+            When ``True`` (default) includes the raw metrics underlying the importance score.
+        branch:
+            Branch name for ``per-branch`` caches.
+        cache_strategy:
+            ``"shared"`` or ``"per-branch"`` (default ``"shared"``); must match the clone.
 
-        Args:
-            repo_path: Path/URL matching what was provided to clone_repo
-            files: Optional list of specific files to analyze
-            directories: Optional list of specific directories to analyze
-            limit: Maximum number of files to return (default: 50)
-            include_metrics: Include detailed metrics in response (default: True)
+        Response schema
+        ---------------
+        ``{"status": "success", "files": [...], "total_files_analyzed": <int>, "message": <str | None>}``
+            * Each ``files`` entry contains:
+              - ``path`` – relative file path.
+              - ``importance_score`` – weighted sum of function count, total/max cyclomatic
+                complexity, and lines of code.
+              - ``metrics`` – included when ``include_metrics=True`` with keys ``total_ccn``,
+                ``max_ccn``, ``function_count``, and ``nloc``.
+        ``{"status": "error", "error": <message>}``
+            Returned when the repository is missing or when analysis fails.
 
-        Returns:
-            dict: {
-                "status": str,  # "success", "error"
-                "files": [{
-                    "path": str,
-                    "importance_score": float,
-                    "metrics": {  # Only if include_metrics=True
-                        "total_ccn": int,
-                        "max_ccn": int,
-                        "function_count": int,
-                        "nloc": int
-                    }
-                }],
-                "total_files_analyzed": int
-            }
+        Notes
+        -----
+        * Use this ranking to target deeper dives with :func:`get_source_repo_map` or code review.
+        * Complexity analysis can take several seconds on large repositories. If the client
+          disconnects, repeat the call to check progress—the analyzer caches intermediate results.
+        * Refer to **Analysis Size Management** in the server instructions for guidance on narrowing
+          ``files``/``directories`` filters when thresholds are exceeded.
         """
         try:
             # Import and initialize the analyzer
@@ -564,57 +509,39 @@ NOTE: This tool is designed to guide initial codebase exploration by identifying
                 "error": f"An unexpected error occurred: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_documentation",
-        description="""Retrieve and analyze documentation files from a repository, including README files, API docs, design documents, and other documentation. Repository must be previously cloned via clone_repo.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors""",
-    )
+    @mcp_server.tool(name="get_repo_documentation")
     async def get_repo_documentation(repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
-        """
-        Retrieve and analyze repository documentation files.
+        """Aggregate documentation assets discovered in a cloned repository.
 
-        Searches for and analyzes documentation within the repository, including:
-        - README files
-        - API documentation
-        - Design documents
-        - User guides
-        - Installation instructions
-        - Other documentation files
+        Parameters
+        ----------
+        repo_path:
+            Identifier originally passed to :func:`clone_repo`.
+        branch:
+            Branch name for ``per-branch`` caches.
+        cache_strategy:
+            ``"shared"`` or ``"per-branch"`` (default ``"shared"``); must match the clone.
 
-        Args:
-            repo_path (str): Path or URL matching what was originally provided to clone_repo
+        Response schema
+        ---------------
+        ``{"status": "success", "documentation": {"files": [...], "directories": [...], "stats": {...}}, "message": <str | None>}``
+            * ``files`` – list of documentation artifacts with ``path``, ``category`` (readme/api/
+              design/etc.), and ``format`` (markdown/rst/html/plain).
+            * ``directories`` – aggregate counts by directory.
+            * ``stats`` – overall totals, counts by category, and counts by format.
+        ``{"status": "waiting", "message": <str>}``
+            Documentation scan queued or still running.
+        ``{"status": "error", "message": <str>}``
+            Repository missing, still cloning, or analysis failed.
 
-        Returns:
-            dict: Documentation analysis results with format:
-                {
-                    "status": str,  # "success", "error", or "waiting"
-                    "message": str,  # Only for error/waiting status
-                    "documentation": {  # Only for success status
-                        "files": [
-                            {
-                                "path": str,      # Relative path in repo
-                                "category": str,  # readme, api, docs, etc.
-                                "format": str     # markdown, rst, etc.
-                            }
-                        ],
-                        "directories": [
-                            {
-                                "path": str,
-                                "doc_count": int
-                            }
-                        ],
-                        "stats": {
-                            "total_files": int,
-                            "by_category": dict,
-                            "by_format": dict
-                        }
-                    }
-                }
+        Notes
+        -----
+        * Documentation discovery runs as part of the repository-map workflow. Expect ``waiting``
+          until the initial clone has finished building its map.
+        * Use these results to surface README files, architecture docs, or onboarding guides in
+          downstream conversations.
+        * Consult **Documentation Discovery Workflow** in the server instructions for additional
+          curation tips and category definitions.
         """
         try:
             # Call documentation backend module (thin endpoint)

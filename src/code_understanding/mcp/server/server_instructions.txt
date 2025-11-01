@@ -1,0 +1,91 @@
+# Code Understanding MCP Server – Agent Handbook
+
+## Repository Discovery & Preparation
+1. Begin with `list_repository_branches(repo_url)` to see whether the repository is already cached
+   and which branches have active entries.
+   - Inspect `clone_status` / `repo_map_status` to determine whether a previous clone is still
+     running or stale.
+   - Reuse the reported `cache_strategy` and `requested_branch` for subsequent calls.
+2. When a cache entry exists, call `refresh_repo(repo_path, branch?, cache_strategy?)` to pull the
+   latest commits before doing deeper analysis.
+3. If no cache entry is found, run `clone_repo(url, branch?, cache_strategy="shared"|"per-branch")`.
+   - Use the exact same `url`/path for every subsequent tool call (`repo_path`).
+   - Choose `per-branch` when you need multiple branches cached simultaneously (e.g., PR reviews).
+   - Choose `shared` for single-branch workflows where branch switches can happen in-place.
+4. For `per-branch` caches, include the `branch` parameter on every follow-up tool call so the
+   server selects the correct working tree.
+
+## Refresh & Analysis Lifecycle
+1. Whether you refreshed or cloned, a repository-map build runs automatically, but you seldom need
+   the entire map immediately. Treat `get_source_repo_map` as a focused probe that you call after
+   scouting the layout with `get_repo_structure`.
+   - Start with `get_repo_structure(repo_path, include_files=True)` to understand the directory
+     tree, file counts, and candidate hotspots.
+   - Feed the interesting directories or files back into `get_source_repo_map` via its
+     `directories`/`files` filters so the returned map fits within your context window.
+2. After pushing new commits, run `refresh_repo(repo_path, branch?, cache_strategy?)` instead of
+   recloning.
+   - The server performs a git pull (or directory copy) and restarts analysis asynchronously.
+   - Poll `get_source_repo_map` with the previously chosen filters; intermediate responses will
+     report `status` values `"building"` or `"waiting"` until the rebuild finishes.
+3. If a client disconnects or times out, do **not** retry the clone/refresh immediately. Use
+   `list_repository_branches` to confirm the in-progress operation, then resume polling.
+
+## Cache Directory Layout & Branch Handling
+1. Shared caches (`cache_strategy="shared"`) keep a single working tree. Branch switches happen
+   in-place and may temporarily diverge from the originally requested branch.
+2. Per-branch caches (`cache_strategy="per-branch"`) maintain isolated working trees rooted at
+   branch-specific directories. Use the same `branch` argument on every subsequent tool call to
+   select the correct cache entry.
+3. `list_repository_branches` exposes `clone_status` and `repo_map_status` dictionaries with
+   status enums plus timestamps—inspect these to decide whether to wait, refresh, or reclone.
+
+## Analysis Size Management
+1. Large repositories can exceed token or file-count thresholds, so **plan each probe**.
+2. Begin with `get_repo_structure` to build a mental map of the repository and shortlist the
+   directories or files you actually need.
+3. Use the `directories` and `files` filters on `get_source_repo_map` and `get_repo_critical_files`
+   to reduce scope before increasing `max_tokens`.
+4. When `get_source_repo_map` returns `"threshold_exceeded"`, read `metadata.override_guidance`
+   for suggested filters. Apply those filters on your next request or break the work into multiple
+   targeted calls.
+5. Combine structural insights from `get_repo_structure` with complexity rankings from
+   `get_repo_critical_files` to prioritize the most relevant portions of the codebase.
+
+## Documentation Discovery Workflow
+1. Documentation extraction runs alongside repository-map generation. Expect `get_repo_documentation`
+   to return `"waiting"` until the initial analysis finishes.
+2. Successful responses contain:
+   - `files`: individual documentation artifacts with categories and formats.
+   - `directories`: aggregated counts by directory path.
+   - `stats`: totals by category and format to help you summarize findings quickly.
+3. Use these results to prepare onboarding summaries or to surface key READMEs when answering user
+   questions.
+
+## Recommended Tool Patterns
+1. **Initial onboarding or reconnecting to a known repo**
+   ```
+   list_repository_branches(url)
+   → refresh_repo(repo_path, branch?, cache_strategy?)  # when a cache entry exists
+   → clone_repo(url, branch?, cache_strategy?)           # only if no cache entry is present
+   → get_repo_structure(repo_path, include_files=True)
+   → get_source_repo_map(repo_path, directories=[...], files=[...], max_tokens=4000)
+   → get_repo_critical_files(repo_path, directories=[...], limit=10)
+   → get_repo_documentation(repo_path)
+   ```
+   *Use the structure results to pick directories/files before requesting the repo map.*
+2. **Post-update refresh**
+   ```
+   refresh_repo(repo_path, branch?, cache_strategy?)
+   → poll get_source_repo_map(repo_path, ...)
+   → revisit get_repo_critical_files or get_repo_structure if the directory layout changed
+   ```
+3. **Targeted exploration**
+   ```
+   get_repo_structure(repo_path, directories=[...], include_files=True)
+   → get_repo_file_content(repo_path, resource_path="path/to/file.py")
+   → get_source_repo_map(repo_path, files=["path/to/file.py"], max_tokens=1500)
+   ```
+
+For tool-specific response schemas and error handling, refer to the individual docstrings. These
+instructions stay focused on workflow choreography so you can combine tools confidently.
