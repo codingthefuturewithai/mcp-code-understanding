@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import click
@@ -25,14 +26,20 @@ logging.basicConfig(
 logger = logging.getLogger("code_understanding.mcp")
 
 
+_INSTRUCTIONS_PATH = Path(__file__).parent / "server_instructions.txt"
+_SERVER_INSTRUCTIONS = (
+    _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    if _INSTRUCTIONS_PATH.exists()
+    else None
+)
+
+
 def create_mcp_server(config: ServerConfig = None) -> FastMCP:
     """Create and configure the MCP server instance"""
     if config is None:
         config = load_config()
 
-    # FastMCP created without monkey-patching
-
-    server = FastMCP(name=config.name)
+    server = FastMCP(name=config.name, instructions=_SERVER_INSTRUCTIONS)
 
     # Initialize core components
     repo_manager = RepositoryManager(config.repository)
