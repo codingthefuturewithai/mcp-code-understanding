@@ -4,20 +4,21 @@ Following test_repo_map_simple.py's core RepoMap interaction patterns.
 """
 
 import asyncio
+import logging
 import os
 import time
 from datetime import datetime
-import logging
-import tiktoken
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import tiktoken
 from aider.io import InputOutput
 from aider.repomap import RepoMap
-from .extended_repo_map import UntruncatedRepoMap
 
 from ..repository.cache import RepositoryCache, RepositoryMetadata
 from ..repository.file_filtering import RepoFilter
 from ..repository.path_utils import get_cache_path
+from .extended_repo_map import UntruncatedRepoMap
 from .extractor import RepoMapExtractor
 
 logger = logging.getLogger(__name__)
@@ -236,13 +237,15 @@ class RepoMapBuilder:
 
         # Case 1: Both directories and files are provided (INTERSECTION)
         if directories and files:
-            logger.debug(f"Scanning specific directories for specific files (Intersection): dirs={directories}, files={files}")
+            logger.debug(
+                f"Scanning specific directories for specific files (Intersection): dirs={directories}, files={files}"
+            )
             # First, get all source files from the specified directories.
             files_in_dirs = repo_filter.find_source_files(directories)
-            
+
             # Now, filter this list to include only the files that match the basenames in the `files` list.
             file_basenames_to_match = {os.path.basename(f) for f in files}
-            
+
             for file_path in files_in_dirs:
                 if os.path.basename(file_path) in file_basenames_to_match:
                     target_files.append(file_path)
@@ -256,9 +259,9 @@ class RepoMapBuilder:
         elif files:
             logger.debug(f"Searching for specific files globally: {files}")
             # This requires a full scan to find files by name.
-            all_source_files = repo_filter.find_source_files() # Scans the whole repo
+            all_source_files = repo_filter.find_source_files()  # Scans the whole repo
             file_basenames_to_match = {os.path.basename(f) for f in files}
-            
+
             for file_path in all_source_files:
                 if os.path.basename(file_path) in file_basenames_to_match:
                     target_files.append(file_path)
@@ -374,12 +377,14 @@ class RepoMapBuilder:
         """
         DEFAULT_FILES_THRESHOLD = 5000
 
-        cache_path = str(get_cache_path(
-            self.cache.cache_dir, 
-            repo_path, 
-            branch if cache_strategy == "per-branch" else None,
-            per_branch=(cache_strategy == "per-branch")
-        ).resolve())
+        cache_path = str(
+            get_cache_path(
+                self.cache.cache_dir,
+                repo_path,
+                branch if cache_strategy == "per-branch" else None,
+                per_branch=(cache_strategy == "per-branch"),
+            ).resolve()
+        )
         logger.debug(
             f"Getting repo map content for {repo_path} (max_tokens={max_tokens})"
         )
@@ -433,16 +438,20 @@ class RepoMapBuilder:
         # Only proceed with content generation if both clone and build are complete
         try:
             repo_map = await self.initialize_repo_map(cache_path, max_tokens)
-            
+
             # DEBUG: Log the actual parameters received
             logger.debug(f"[FILTERING DEBUG] files parameter: {files}")
             logger.debug(f"[FILTERING DEBUG] directories parameter: {directories}")
-            logger.debug(f"[FILTERING DEBUG] files and directories after filtering empty: files={files if files else None}, directories={directories if directories else None}")
-            
+            logger.debug(
+                f"[FILTERING DEBUG] files and directories after filtering empty: files={files if files else None}, directories={directories if directories else None}"
+            )
+
             # Filter out empty arrays - treat them as None
             effective_files = files if files else None
             effective_directories = directories if directories else None
-            logger.debug(f"[FILTERING DEBUG] effective filtering condition: {bool(effective_files or effective_directories)}")
+            logger.debug(
+                f"[FILTERING DEBUG] effective filtering condition: {bool(effective_files or effective_directories)}"
+            )
 
             # Use optimized gathering if specific files/directories are provided
             if effective_files or effective_directories:
@@ -454,6 +463,37 @@ class RepoMapBuilder:
                 target_files = await self.gather_files(cache_path)
 
             logger.debug(f"Processing {len(target_files)} files")
+
+            # SAFETY GUARD: If there are no target files after filtering/intersection,
+            # return a benign success payload rather than attempting to build a map.
+            # Some upstream implementations divide by the number of files when
+            # computing weights, which can raise a ZeroDivisionError for empty sets.
+            if not target_files:
+                logger.info(
+                    "No matching source files after applying filters; returning empty map content"
+                )
+                # Try to include current branch if available
+                current_branch = None
+                try:
+                    repo_status = await self.cache.get_repository_status(cache_path)
+                    if repo_status:
+                        current_branch = repo_status.get("current_branch")
+                except Exception:
+                    pass
+
+                return {
+                    "status": "success",
+                    "content": "",
+                    "metadata": {
+                        "excluded_files_by_dir": {},
+                        "is_complete": True,
+                        "max_tokens": max_tokens,
+                        "output_tokens": 0,
+                        "branch": current_branch,
+                        "cache_strategy": cache_strategy,
+                        "message": "No matching files for provided filters",
+                    },
+                }
 
             # Check against threshold before proceeding
             file_count = len(target_files)
@@ -515,7 +555,7 @@ class RepoMapBuilder:
                     current_branch = repo_status.get("current_branch")
             except Exception:
                 pass  # Continue without branch info if we can't get it
-            
+
             return {
                 "status": "success",
                 "content": content,
@@ -535,8 +575,12 @@ class RepoMapBuilder:
             }
 
     async def get_repo_structure(
-        self, repo_path: str, directories: List[str] = None, include_files: bool = False,
-        branch: Optional[str] = None, cache_strategy: str = "shared"
+        self,
+        repo_path: str,
+        directories: List[str] = None,
+        include_files: bool = False,
+        branch: Optional[str] = None,
+        cache_strategy: str = "shared",
     ) -> Dict[str, Any]:
         """
         Get repository structure information with optional file listings.
@@ -565,12 +609,14 @@ class RepoMapBuilder:
                 }
         """
         # Convert repo_path to absolute cache path
-        cache_path = str(get_cache_path(
-            self.cache.cache_dir, 
-            repo_path, 
-            branch if cache_strategy == "per-branch" else None,
-            per_branch=(cache_strategy == "per-branch")
-        ).resolve())
+        cache_path = str(
+            get_cache_path(
+                self.cache.cache_dir,
+                repo_path,
+                branch if cache_strategy == "per-branch" else None,
+                per_branch=(cache_strategy == "per-branch"),
+            ).resolve()
+        )
         logger.debug(f"Getting repo structure for {repo_path}")
 
         # Check repository status, similar to get_repo_map_content but only checking clone status

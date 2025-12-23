@@ -9,11 +9,12 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, Literal
+from typing import Any, Dict, Literal, Optional, Union
 from urllib.parse import urlparse
 
 import git
 import pathspec
+from git import Git
 from git.repo import Repo
 
 from ..config import RepositoryConfig
@@ -312,18 +313,25 @@ class RepositoryManager:
                 await asyncio.to_thread(
                     Repo.clone_from, clone_url, cache_path, branch=branch
                 )
-                
+
                 # Verify the repository is on the correct branch after cloning
                 if not is_local and branch:
                     try:
                         repo = Repo(cache_path)
-                        if not repo.head.is_detached and repo.active_branch.name != branch:
+                        if (
+                            not repo.head.is_detached
+                            and repo.active_branch.name != branch
+                        ):
                             # If not on the requested branch, check it out
-                            logger.debug(f"Repository cloned to {repo.active_branch.name}, checking out {branch}")
+                            logger.debug(
+                                f"Repository cloned to {repo.active_branch.name}, checking out {branch}"
+                            )
                             repo.git.checkout(branch)
                             logger.debug(f"Successfully checked out branch: {branch}")
                     except Exception as e:
-                        logger.warning(f"Could not verify/checkout branch {branch}: {e}")
+                        logger.warning(
+                            f"Could not verify/checkout branch {branch}: {e}"
+                        )
 
             # Update success status
             await self.cache.update_clone_status(
@@ -427,17 +435,17 @@ class RepositoryManager:
                 )
 
     async def clone_repository(
-        self, 
-        url: str, 
+        self,
+        url: str,
         branch: Optional[str] = None,
-        cache_strategy: Literal["shared", "per-branch"] = "shared"
+        cache_strategy: Literal["shared", "per-branch"] = "shared",
     ) -> Dict[str, Any]:
         """Clone a repository with configurable cache strategy.
-        
+
         Args:
             url: Repository URL
             branch: Target branch to clone
-            cache_strategy: 
+            cache_strategy:
                 - "shared": One cache entry per repo, switch branches in place (default)
                 - "per-branch": Separate cache entries for each branch
         """
@@ -445,13 +453,15 @@ class RepositoryManager:
 
         # Get cache path based on strategy
         cache_path = get_cache_path(
-            self.cache_dir, 
-            url, 
+            self.cache_dir,
+            url,
             branch if cache_strategy == "per-branch" else None,
-            per_branch=(cache_strategy == "per-branch")
+            per_branch=(cache_strategy == "per-branch"),
         )
         str_path = str(cache_path.resolve())
-        logger.debug(f"Cache path for repository ({cache_strategy} strategy): {str_path}")
+        logger.debug(
+            f"Cache path for repository ({cache_strategy} strategy): {str_path}"
+        )
 
         # Check if repository is already cloned or being cloned
         repo_status = await self.cache.get_repository_status(str_path)
@@ -461,52 +471,56 @@ class RepositoryManager:
                 # Check if we need to switch branches (only for shared strategy)
                 stored_branch = repo_status.get("requested_branch")
                 current_branch = repo_status.get("current_branch")
-                
+
                 if branch and stored_branch != branch and cache_strategy == "shared":
                     # Switch to the requested branch
                     try:
                         repo = Repo(cache_path)
-                        
+
                         # Try to checkout the requested branch
                         try:
                             repo.git.checkout(branch)
-                            logger.debug(f"Successfully switched from {current_branch} to {branch}")
-                            
+                            logger.debug(
+                                f"Successfully switched from {current_branch} to {branch}"
+                            )
+
                             # Update metadata with new branch
-                            await self.cache.add_repo(str_path, url, branch, cache_strategy)
-                            
+                            await self.cache.add_repo(
+                                str_path, url, branch, cache_strategy
+                            )
+
                             return {
                                 "status": "switched_branch",
                                 "path": str_path,
                                 "message": f"Switched from {stored_branch} to {branch}",
                                 "previous_branch": stored_branch,
-                                "current_branch": branch
+                                "current_branch": branch,
                             }
                         except Exception as checkout_error:
                             return {
                                 "status": "error",
-                                "error": f"Failed to switch to branch {branch}: {str(checkout_error)}"
+                                "error": f"Failed to switch to branch {branch}: {str(checkout_error)}",
                             }
                     except Exception as e:
                         return {
-                            "status": "error", 
-                            "error": f"Failed to access repository for branch switching: {str(e)}"
+                            "status": "error",
+                            "error": f"Failed to access repository for branch switching: {str(e)}",
                         }
                 else:
                     # For per-branch strategy or same branch, return already cloned
                     return {
                         "status": "already_cloned",
-                        "path": str_path, 
+                        "path": str_path,
                         "message": "Repository already cloned and ready",
                         "current_branch": stored_branch,
-                        "cache_strategy": cache_strategy
+                        "cache_strategy": cache_strategy,
                     }
             elif clone_status and clone_status.get("status") in ["cloning", "copying"]:
                 return {
                     "status": "clone_in_progress",
                     "path": str_path,
                     "message": "Repository clone already in progress",
-                    "cache_strategy": cache_strategy
+                    "cache_strategy": cache_strategy,
                 }
 
         # Before cloning, check if we need to clean up any repositories
@@ -521,13 +535,15 @@ class RepositoryManager:
 
         try:
             # Start clone in background
-            asyncio.create_task(self._do_clone(url, str_path, branch, False, cache_strategy))
+            asyncio.create_task(
+                self._do_clone(url, str_path, branch, False, cache_strategy)
+            )
 
             return {
                 "status": "pending",
                 "path": str_path,
                 "message": "Clone started in background",
-                "cache_strategy": cache_strategy
+                "cache_strategy": cache_strategy,
             }
 
         except Exception as e:
@@ -535,13 +551,13 @@ class RepositoryManager:
             return {"status": "error", "error": str(e)}
 
     async def refresh_repository(
-        self, 
-        path: str, 
-        branch: Optional[str] = None, 
-        cache_strategy: Literal["shared", "per-branch"] = "shared"
+        self,
+        path: str,
+        branch: Optional[str] = None,
+        cache_strategy: Literal["shared", "per-branch"] = "shared",
     ) -> Dict[str, Any]:
         """Refresh a repository with latest changes and optionally switch branches.
-        
+
         Args:
             path: Repository path or URL
             branch: Optional branch to switch to during refresh
@@ -550,10 +566,10 @@ class RepositoryManager:
         try:
             # Get cache path based on strategy (should match original clone)
             cache_path = get_cache_path(
-                self.cache_dir, 
-                path, 
+                self.cache_dir,
+                path,
                 branch if cache_strategy == "per-branch" else None,
-                per_branch=(cache_strategy == "per-branch")
+                per_branch=(cache_strategy == "per-branch"),
             )
             str_path = str(cache_path.resolve())
 
@@ -577,13 +593,15 @@ class RepositoryManager:
                     }
 
             # Start refresh in background
-            asyncio.create_task(self._do_refresh(path, str_path, branch, cache_strategy))
+            asyncio.create_task(
+                self._do_refresh(path, str_path, branch, cache_strategy)
+            )
 
             return {
                 "status": "pending",
                 "path": str_path,
                 "message": "Refresh started in background",
-                "cache_strategy": cache_strategy
+                "cache_strategy": cache_strategy,
             }
 
         except Exception as e:
@@ -592,19 +610,19 @@ class RepositoryManager:
 
     async def list_repository_branches(self, repo_url: str) -> Dict[str, Any]:
         """List all cached versions of a repository across different branches.
-        
+
         Args:
             repo_url: Repository URL to search for
-            
+
         Returns:
             Dictionary containing information about each cached branch including paths and metadata.
         """
         try:
             cached_branches = []
-            
+
             with self.cache._file_lock():
                 metadata = self.cache._read_metadata()
-                
+
                 for cache_path, repo_metadata in metadata.items():
                     # Check if this cache entry is for the requested repo URL
                     if repo_metadata.url == repo_url:
@@ -612,37 +630,82 @@ class RepositoryManager:
                         try:
                             repo = Repo(cache_path)
                             if repo.head.is_detached:
-                                current_branch = f"detached at {repo.head.commit.hexsha[:8]}"
+                                current_branch = (
+                                    f"detached at {repo.head.commit.hexsha[:8]}"
+                                )
                             else:
                                 current_branch = repo.active_branch.name
                         except Exception:
                             current_branch = "unknown"
-                        
+
                         # Get cache strategy from metadata (preferred) or fall back to detection
                         cache_strategy = repo_metadata.cache_strategy or "shared"
-                        
-                        cached_branches.append({
-                            "requested_branch": repo_metadata.branch,
-                            "current_branch": current_branch,
-                            "cache_path": cache_path,
-                            "cache_strategy": cache_strategy,
-                            "last_access": repo_metadata.last_access,
-                            "clone_status": repo_metadata.clone_status,
-                            "repo_map_status": repo_metadata.repo_map_status
-                        })
-            
+
+                        cached_branches.append(
+                            {
+                                "requested_branch": repo_metadata.branch,
+                                "current_branch": current_branch,
+                                "cache_path": cache_path,
+                                "cache_strategy": cache_strategy,
+                                "last_access": repo_metadata.last_access,
+                                "clone_status": repo_metadata.clone_status,
+                                "repo_map_status": repo_metadata.repo_map_status,
+                            }
+                        )
+
             return {
                 "status": "success",
                 "repo_url": repo_url,
                 "cached_branches": cached_branches,
-                "total_cached": len(cached_branches)
+                "total_cached": len(cached_branches),
             }
-            
+
         except Exception as e:
             logger.error(f"Error listing repository branches: {str(e)}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    async def _do_refresh(self, original_path: str, cache_path: str, branch: Optional[str] = None, cache_strategy: Optional[str] = None):
+    async def list_remote_branches(self, repo_url: str) -> Dict[str, Any]:
+        """List all remote branches available for the given Git repository URL.
+
+        Uses `git ls-remote --heads` to avoid cloning the repository.
+
+        Args:
+            repo_url: Remote repository URL
+
+        Returns:
+            Dict with keys: status, repo_url, remote_branches (list[str]), total_remote (int)
+        """
+        try:
+            # Run ls-remote in a thread to avoid blocking the event loop
+            output: str = await asyncio.to_thread(Git().ls_remote, "--heads", repo_url)
+
+            remote_branches = []
+            for line in output.splitlines():
+                parts = line.split()  # "<sha>\trefs/heads/<branch>"
+                if len(parts) >= 2:
+                    ref = parts[1]
+                    if ref.startswith("refs/heads/"):
+                        remote_branches.append(ref[len("refs/heads/") :])
+
+            return {
+                "status": "success",
+                "repo_url": repo_url,
+                "remote_branches": sorted(remote_branches),
+                "total_remote": len(remote_branches),
+            }
+        except Exception as e:
+            logger.error(
+                f"Error listing remote branches for {repo_url}: {e}", exc_info=True
+            )
+            return {"status": "error", "error": str(e)}
+
+    async def _do_refresh(
+        self,
+        original_path: str,
+        cache_path: str,
+        branch: Optional[str] = None,
+        cache_strategy: Optional[str] = None,
+    ):
         """Internal method to perform the actual refresh"""
         try:
             # Update status to refreshing
@@ -663,12 +726,19 @@ class RepositoryManager:
                 await asyncio.to_thread(repo.remotes.origin.pull)
                 if branch:
                     try:
-                        if not repo.head.is_detached and repo.active_branch.name != branch:
-                            logger.debug(f"Repository pulled to {repo.active_branch.name}, checking out {branch}")
+                        if (
+                            not repo.head.is_detached
+                            and repo.active_branch.name != branch
+                        ):
+                            logger.debug(
+                                f"Repository pulled to {repo.active_branch.name}, checking out {branch}"
+                            )
                             repo.git.checkout(branch)
                             logger.debug(f"Successfully checked out branch: {branch}")
                     except Exception as e:
-                        logger.warning(f"Could not verify/checkout branch {branch} during refresh: {e}")
+                        logger.warning(
+                            f"Could not verify/checkout branch {branch} during refresh: {e}"
+                        )
             else:
                 # For local dirs:
                 original_path = Path(original_path).resolve()
@@ -699,7 +769,9 @@ class RepositoryManager:
 
             # Update branch information if a branch was specified
             if branch and is_git:
-                await self.cache.add_repo(cache_path, original_path, branch, cache_strategy)
+                await self.cache.add_repo(
+                    cache_path, original_path, branch, cache_strategy
+                )
 
             # Start repo map build
             try:

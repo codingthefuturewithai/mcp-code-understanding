@@ -1,8 +1,8 @@
 # ⚠️ Platform Support Notice
 
-**This MCP server currently only works on Mac or Linux. Windows is NOT supported at this time.**
+**This MCP server has been tested on macOS and Linux. Windows support is currently unverified (not yet tested).**
 
-*Support for Windows is planned for a future release, and work is ongoing to enable compatibility.*
+If you try Windows and encounter issues, please open an issue so we can improve cross-platform support.
 
 # Code Understanding MCP Server
 
@@ -10,7 +10,7 @@ An MCP (Model Context Protocol) server designed to understand codebases and prov
 
 ## 🤖 AI Assistant Installation
 
-**Have an AI coding assistant help you install this server!** Copy and paste the contents of our [AI Setup Prompt](docs/AI_SETUP_GUIDE.md) to your AI assistant (Claude, ChatGPT, Cursor, etc.) and it will guide you through the entire installation process.
+**Have an AI coding assistant help you install this server!** Copy and paste the contents of our [Setup Assistant Prompt](SETUP_ASSISTANT_PROMPT.md) to your AI assistant (Claude, ChatGPT, Cursor, etc.) and it will guide you through the entire installation process.
 
 ## Features
 
@@ -38,62 +38,56 @@ This server requires `uv`, a modern Python package manager. If you don't already
 curl -sSf https://astral.sh/uv/install.sh | sh
 
 # Install UV (Windows PowerShell)
-ipow https://astral.sh/uv/install.ps1 | iex
+irm https://astral.sh/uv/install.ps1 | iex
 ```
 
 For more installation options, visit the official `uv` installation guide at [astral.sh/uv](https://astral.sh/uv).
 
 ### Installation Methods
 
-#### Method 1: Tool Installation (Recommended)
-
-For the most reliable isolated installation:
+#### Method 1: Direct execution with uvx (Recommended)
 
 ```bash
-# Install the MCP server as a tool
-uv tool install code-understanding-mcp-server
+# Run directly without installing a global binary
+uvx code-understanding-mcp-server
 ```
 
-#### Method 2: Direct Execution with uvx (Fallback)
+This launches the server in an isolated environment managed by UV each time.
 
-⚠️ **Warning**: This method may encounter dependency conflicts with other Python packages on your system. Use Method 1 if you experience any issues.
+#### Method 2: Virtual environment install (Optional)
+
+If you prefer a persistent binary inside a dedicated virtual environment:
 
 ```bash
-# Run directly without installation
-uvx code-understanding-mcp-server
+# Create a dedicated virtual environment
+uv venv ~/.venvs/mcp-code-understanding
+
+# Activate it (macOS/Linux)
+source ~/.venvs/mcp-code-understanding/bin/activate
+
+# Install the package into the venv
+uv pip install code-understanding-mcp-server
+
+# Run the server
+code-understanding-mcp-server
 ```
 
 ### Verify Installation
 
-After installation, verify the binary location:
+Depending on your chosen method:
 
 ```bash
-# For Method 1 (tool installation)
-which code-understanding-mcp-server
-# Expected output example: /Users/username/.local/bin/code-understanding-mcp-server
+# Method 1 (uvx): runs via uvx; no persistent binary is installed
+uvx --version
 
-# For Method 2 (uvx) - no persistent binary
-# The tool runs directly through uvx
+# Method 2 (venv install): verify the binary inside your venv
+which code-understanding-mcp-server
+# Expected output example: /Users/username/.venvs/mcp-code-understanding/bin/code-understanding-mcp-server
 ```
 
 ### Configure Your MCP Client
 
-Use the verified binary path in your MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "code-understanding": {
-      "command": "/path/to/code-understanding-mcp-server",
-      "args": []
-    }
-  }
-}
-```
-
-Replace `/path/to/code-understanding-mcp-server` with the actual path from the verification step above.
-
-For uvx method (less reliable):
+Use one of the following configurations for your MCP client:
 
 ```json
 {
@@ -103,6 +97,19 @@ For uvx method (less reliable):
       "args": [
         "code-understanding-mcp-server"
       ]
+    }
+  }
+}
+```
+
+Alternatively, if you installed into a virtual environment, point directly to the binary in that environment:
+
+```json
+{
+  "mcpServers": {
+    "code-understanding": {
+      "command": "/path/to/.venvs/mcp-code-understanding/bin/code-understanding-mcp-server",
+      "args": []
     }
   }
 }
@@ -233,12 +240,12 @@ Available options:
 ### Platform-Specific Notes
 
 #### macOS
-- Binary typically installs to: `~/.local/bin/code-understanding-mcp-server`
-- Ensure `~/.local/bin` is in your PATH
+- With `uvx`, no persistent binary is installed; no PATH changes are required
+- With a virtual environment, ensure you activate it or reference the full path to the venv binary
 
 #### Linux
-- Binary typically installs to: `~/.local/bin/code-understanding-mcp-server`
-- May require: `export PATH="$HOME/.local/bin:$PATH"` in your shell profile
+- With `uvx`, no persistent binary is installed; no PATH changes are required
+- With a virtual environment, you may prefer adding a helper alias or activating the venv before use
 
 #### Windows
 - **Not currently supported** - Windows support is planned for a future release
@@ -248,22 +255,21 @@ Available options:
 
 #### Dependency Conflicts
 
-If you encounter dependency conflicts when using `uvx`:
+If you encounter dependency conflicts when using `uvx`, create an isolated environment and install the package there:
 
-1. Switch to the tool installation method:
-   ```bash
-   uv tool install code-understanding-mcp-server
-   ```
+```bash
+# Create a dedicated virtual environment
+uv venv ~/.venvs/mcp-code-understanding
 
-2. If conflicts persist, create an isolated environment:
-   ```bash
-   # Create a dedicated virtual environment
-   uv venv ~/.venvs/mcp-code-understanding
-   # Activate it (macOS/Linux)
-   source ~/.venvs/mcp-code-understanding/bin/activate
-   # Install the package
-   uv pip install code-understanding-mcp-server
-   ```
+# Activate it (macOS/Linux)
+source ~/.venvs/mcp-code-understanding/bin/activate
+
+# Install the package
+uv pip install code-understanding-mcp-server
+
+# Run the server
+code-understanding-mcp-server
+```
 
 #### Binary Not Found
 
@@ -281,7 +287,7 @@ If the installed binary is not found:
    export PATH="$HOME/.local/bin:$PATH"
    ```
 
-3. Use absolute path in MCP configuration
+3. Use the absolute path to your venv binary in MCP configuration if not activating the venv
 
 ## Server Configuration
 

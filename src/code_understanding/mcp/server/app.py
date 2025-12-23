@@ -2,16 +2,18 @@
 Core MCP server implementation using FastMCP.
 """
 
+import asyncio
+import json
 import logging
 import sys
-import asyncio
-import click
 from typing import List, Optional
 
+import click
 from mcp.server.fastmcp import FastMCP
+
 from code_understanding.config import ServerConfig, load_config
-from code_understanding.repository import RepositoryManager
 from code_understanding.context.builder import RepoMapBuilder
+from code_understanding.repository import RepositoryManager
 from code_understanding.repository.documentation import get_repository_documentation
 
 # Configure logging
@@ -27,6 +29,8 @@ def create_mcp_server(config: ServerConfig = None) -> FastMCP:
     """Create and configure the MCP server instance"""
     if config is None:
         config = load_config()
+
+    # FastMCP created without monkey-patching
 
     server = FastMCP(name=config.name)
 
@@ -47,18 +51,13 @@ def register_tools(
 ) -> None:
     """Register all MCP tools with the server."""
 
-    @mcp_server.tool(
-        name="get_repo_file_content",
-        description="""Retrieve file contents or directory listings from a repository. For files, returns the complete file content. For directories, returns a non-recursive listing of immediate files and subdirectories.
-
-PARAMETER GUIDANCE:
-- repo_path: (Required) MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-- resource_path: (Optional) Path to the target file or directory within the repository. If not provided, it defaults to the repository's root directory.""",
-    )
-    async def get_repo_file_content(repo_path: str, resource_path: Optional[str] = None, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
+    @mcp_server.tool(name="get_repo_file_content")
+    async def get_repo_file_content(
+        repo_path: str,
+        resource_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        cache_strategy: str = "shared",
+    ) -> dict:
         """
         Retrieve file contents or directory listings from a repository.
 
@@ -96,57 +95,61 @@ PARAMETER GUIDANCE:
 
             # Check metadata.json to ensure repository is cloned and ready
             from code_understanding.repository.path_utils import get_cache_path
+
             cache_path = get_cache_path(
-                repo_manager.cache_dir, 
-                repo_path, 
+                repo_manager.cache_dir,
+                repo_path,
                 branch if cache_strategy == "per-branch" else None,
-                per_branch=(cache_strategy == "per-branch")
+                per_branch=(cache_strategy == "per-branch"),
             )
             str_path = str(cache_path.resolve())
-            
+
             repo_status = await repo_manager.cache.get_repository_status(str_path)
             if not repo_status or "clone_status" not in repo_status:
-                return {"status": "error", "error": "Repository not found. Please clone it first using clone_repo."}
-            
+                return {
+                    "status": "error",
+                    "error": "Repository not found. Please clone it first using clone_repo.",
+                }
+
             clone_status = repo_status["clone_status"]
             if not clone_status:
-                return {"status": "error", "error": "Repository not cloned. Please clone it first using clone_repo."}
+                return {
+                    "status": "error",
+                    "error": "Repository not cloned. Please clone it first using clone_repo.",
+                }
             elif clone_status.get("status") in ["cloning", "copying"]:
-                return {"status": "error", "error": "Repository clone still in progress. Please wait for clone to complete."}
+                return {
+                    "status": "error",
+                    "error": "Repository clone still in progress. Please wait for clone to complete.",
+                }
             elif clone_status.get("status") != "complete":
-                return {"status": "error", "error": "Repository clone failed or incomplete. Please try cloning again."}
-            
+                return {
+                    "status": "error",
+                    "error": "Repository clone failed or incomplete. Please try cloning again.",
+                }
+
             # Clone is complete, create repository instance with correct cache path
             from code_understanding.repository.manager import Repository
+
             repository = Repository(
-                repo_id=str_path,
-                root_path=str_path,
-                repo_type="git",
-                is_git=True
+                repo_id=str_path, root_path=str_path, repo_type="git", is_git=True
             )
             result = await repository.get_resource(resource_path)
-            
+
             # Add branch and cache strategy information to response
             if isinstance(result, dict) and "type" in result:
                 result["branch"] = repo_status.get("current_branch")
                 result["cache_strategy"] = cache_strategy
-            
+
             return result
         except Exception as e:
             logger.error(f"Error getting resource: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="refresh_repo",
-        description="""Update a previously cloned repository in MCP's cache with latest changes and trigger reanalysis. Use this to ensure analysis is based on latest code.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors""",
-    )
-    async def refresh_repo(repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
+    @mcp_server.tool(name="refresh_repo")
+    async def refresh_repo(
+        repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared"
+    ) -> dict:
         """
         Update a previously cloned repository in MCP's cache and refresh its analysis.
 
@@ -181,18 +184,20 @@ REQUIRED PARAMETER GUIDANCE:
         try:
             # Validate cache_strategy
             if cache_strategy not in ["shared", "per-branch"]:
-                return {"status": "error", "error": "cache_strategy must be 'shared' or 'per-branch'"}
-                
-            return await repo_manager.refresh_repository(repo_path, branch, cache_strategy)
+                return {
+                    "status": "error",
+                    "error": "cache_strategy must be 'shared' or 'per-branch'",
+                }
+
+            return await repo_manager.refresh_repository(
+                repo_path, branch, cache_strategy
+            )
         except Exception as e:
             logger.error(f"Error refreshing repository: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="list_repository_branches",
-        description="List all cached versions of a repository across different branches. Shows information about each cached branch including paths, strategies, and metadata.",
-    )
-    async def list_repository_branches(repo_url: str) -> dict:
+    @mcp_server.tool(name="list_cached_repository_branches")
+    async def list_cached_repository_branches(repo_url: str) -> dict:
         """
         List all cached versions of a repository across different branches.
 
@@ -231,14 +236,35 @@ REQUIRED PARAMETER GUIDANCE:
         try:
             return await repo_manager.list_repository_branches(repo_url)
         except Exception as e:
-            logger.error(f"Error listing repository branches: {e}", exc_info=True)
+            logger.error(
+                f"Error listing cached repository branches: {e}", exc_info=True
+            )
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="clone_repo",
-        description="Clone a repository into the MCP server's analysis cache and initiate background analysis. Required before using other analysis endpoints like get_source_repo_map.",
-    )
-    async def clone_repo(url: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
+    # Backward-compat alias (deprecated)
+    @mcp_server.tool(name="list_repository_branches")
+    async def list_repository_branches(repo_url: str) -> dict:  # noqa: F811
+        try:
+            return await repo_manager.list_repository_branches(repo_url)
+        except Exception as e:
+            logger.error(
+                f"Error listing cached repository branches: {e}", exc_info=True
+            )
+            return {"status": "error", "error": str(e)}
+
+    @mcp_server.tool(name="list_remote_branches")
+    async def list_remote_branches(repo_url: str) -> dict:
+        """Surface remote branches using git ls-remote --heads."""
+        try:
+            return await repo_manager.list_remote_branches(repo_url)
+        except Exception as e:
+            logger.error(f"Error listing remote branches: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+
+    @mcp_server.tool(name="clone_repo")
+    async def clone_repo(
+        url: str, branch: Optional[str] = None, cache_strategy: str = "shared"
+    ) -> dict:
         """
         Clone a repository into MCP server's cache and prepare it for analysis.
 
@@ -275,13 +301,18 @@ REQUIRED PARAMETER GUIDANCE:
             # Default branch to "main" if not provided
             if branch is None:
                 branch = "main"
-            
+
             # Validate cache_strategy
             if cache_strategy not in ["shared", "per-branch"]:
-                return {"status": "error", "error": "cache_strategy must be 'shared' or 'per-branch'"}
-            
+                return {
+                    "status": "error",
+                    "error": "cache_strategy must be 'shared' or 'per-branch'",
+                }
+
             # Repository clone with new dual cache strategy support
-            logger.debug(f"[TRACE] clone_repo: Starting clone_repository for {url} with branch {branch} using {cache_strategy} strategy")
+            logger.debug(
+                f"[TRACE] clone_repo: Starting clone_repository for {url} with branch {branch} using {cache_strategy} strategy"
+            )
             result = await repo_manager.clone_repository(url, branch, cache_strategy)
             logger.debug(f"[TRACE] clone_repo: clone_repository completed for {url}")
             return result
@@ -289,53 +320,13 @@ REQUIRED PARAMETER GUIDANCE:
             logger.error(f"Error cloning repository: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    @mcp_server.tool(
-        name="get_source_repo_map",
-        description="""Retrieve a semantic analysis map of the repository's source code structure, including file hierarchy, functions, classes, and their relationships. Repository must be previously cloned via clone_repo.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Status Types:
-- "threshold_exceeded": Indicates analysis scope exceeds processing limits
-- "building": Analysis in progress
-- "waiting": Waiting for prerequisite operation
-- "success": Analysis complete
-- "error": Operation failed
-
-2. Resource Management:
-- Repository size impacts processing time and token usage
-- 'max_tokens' parameter provides approximate control of response size
-    Note: Actual token count may vary slightly above or below specified limit
-- File count threshold exists to prevent overload
-- Processing time scales with both file count and max_tokens
-    Important: Clients should adjust their timeout values proportionally when:
-    * Analyzing larger numbers of files
-    * Specifying higher max_tokens values
-    * Working with complex repositories
-
-3. Scope Control Options:
-- 'files': Analyze specific files. If only this is provided, the entire repository will be searched for matching file names.
-- 'directories': Analyze all source files within specific directories.
-- If BOTH 'files' and 'directories' are provided, the tool will perform an INTERSECTION, analyzing only the files named in 'files' that are also located within the specified 'directories'.
-
-4. Response Metadata:
-- Contains processing statistics and limitation details
-- Provides override_guidance when thresholds are exceeded
-- Reports excluded files and completion status
-
-NOTE: This tool supports both broad and focused analysis strategies. Response handling can be adapted based on specific use case requirements and user preferences.""",
-    )
+    @mcp_server.tool(name="get_source_repo_map")
     async def get_source_repo_map(
         repo_path: str,
-        directories: Optional[List[str]] = None,
-        files: Optional[List[str]] = None,
-        max_tokens: Optional[int] = None,
-        branch: Optional[str] = None,
+        directories: List[str] = [],
+        files: List[str] = [],
+        max_tokens: int = 20000,
+        branch: str = "",
         cache_strategy: str = "shared",
     ) -> dict:
         """
@@ -375,19 +366,18 @@ NOTE: This tool supports both broad and focused analysis strategies. Response ha
             - For large repos, consider using max_tokens or targeting specific directories
         """
         try:
-            # DEBUG: Log the parameters received at MCP endpoint
-            logger.debug(f"[MCP DEBUG] get_source_repo_map called with:")
-            logger.debug(f"[MCP DEBUG]   repo_path: {repo_path}")
-            logger.debug(f"[MCP DEBUG]   files: {files}")
-            logger.debug(f"[MCP DEBUG]   directories: {directories}")
-            logger.debug(f"[MCP DEBUG]   max_tokens: {max_tokens}")
-            
-            if directories is None:
-                directories = []
-                
+            # Convert empty lists to None for backend compatibility
+            directories_list = directories if directories else None
+            files_list = files if files else None
+            branch_opt = branch or None
+
             return await repo_map_builder.get_repo_map_content(
-                repo_path, files=files, directories=directories, max_tokens=max_tokens,
-                branch=branch, cache_strategy=cache_strategy
+                repo_path,
+                files=files_list,
+                directories=directories_list,
+                max_tokens=max_tokens,
+                branch=branch_opt,
+                cache_strategy=cache_strategy,
             )
         except Exception as e:
             logger.error(f"Error getting context: {e}", exc_info=True)
@@ -396,34 +386,13 @@ NOTE: This tool supports both broad and focused analysis strategies. Response ha
                 "error": f"Unexpected error while getting repository context: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_structure",
-        description="""Retrieve directory structure and analyzable file counts for a repository to guide analysis decisions.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Directory Information:
-- Lists directories containing analyzable source code
-- Reports number of analyzable files per directory
-- Shows directory hierarchy
-- Indicates file extensions present in each location
-
-2. Usage:
-- Requires repository to be previously cloned via clone_repo
-- Helps identify main code directories
-- Supports planning targeted analysis
-- Shows where analyzable code is located
-
-NOTE: Use this tool to understand repository structure and choose which directories to analyze in detail.""",
-    )
+    @mcp_server.tool(name="get_repo_structure")
     async def get_repo_structure(
-        repo_path: str, directories: Optional[List[str]] = None, include_files: bool = False,
-        branch: Optional[str] = None, cache_strategy: str = "shared"
+        repo_path: str,
+        directories: List[str] = [],
+        include_files: bool = False,
+        branch: str = "",
+        cache_strategy: str = "shared",
     ) -> dict:
         """
         Get repository structure information with optional file listings.
@@ -451,10 +420,16 @@ NOTE: Use this tool to understand repository structure and choose which director
             }
         """
         try:
-            # Delegate to the RepoMapBuilder service to handle all the details
+            # Convert empty lists to None for backend compatibility
+            directories_list = directories if directories else None
+            branch_opt = branch or None
+
             return await repo_map_builder.get_repo_structure(
-                repo_path, directories=directories, include_files=include_files,
-                branch=branch, cache_strategy=cache_strategy
+                repo_path,
+                directories=directories_list,
+                include_files=include_files,
+                branch=branch_opt,
+                cache_strategy=cache_strategy,
             )
         except Exception as e:
             logger.error(f"Error getting repository structure: {e}", exc_info=True)
@@ -463,51 +438,14 @@ NOTE: Use this tool to understand repository structure and choose which director
                 "error": f"Failed to get repository structure: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_critical_files",
-        description="""Identify and analyze the most structurally significant files in a repository to guide code understanding efforts.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors
-
-RESPONSE CHARACTERISTICS:
-1. Analysis Metrics:
-   - Calculates importance scores based on:
-     * Function count (weight: 2.0)
-     * Total cyclomatic complexity (weight: 1.5)
-     * Maximum cyclomatic complexity (weight: 1.2)
-     * Lines of code (weight: 0.05)
-   - Provides detailed metrics per file
-   - Ranks files by composite importance score
-
-2. Resource Management:
-   - Repository must be previously cloned via clone_repo
-   - Analysis performed on-demand using Lizard
-   - Efficient for both small and large codebases
-   - Supports both full-repo and targeted analysis
-
-3. Scope Control Options:
-   - 'files': Analyze specific files. If only this is provided, the entire repository will be searched for matching file names.
-   - 'directories': Analyze all source files within specific directories.
-   - If BOTH 'files' and 'directories' are provided, the tool will perform an INTERSECTION, analyzing only the files named in 'files' that are also located within the specified 'directories'.
-   - 'limit': Control maximum results returned.
-
-4. Response Metadata:
-   - Total files analyzed
-   - Analysis completion status
-
-NOTE: This tool is designed to guide initial codebase exploration by identifying structurally significant files. Results can be used to target subsequent get_source_repo_map calls for detailed analysis.""",
-    )
+    @mcp_server.tool(name="get_repo_critical_files")
     async def get_repo_critical_files(
         repo_path: str,
-        files: Optional[List[str]] = None,
-        directories: Optional[List[str]] = None,
+        files: List[str] = [],
+        directories: List[str] = [],
         limit: int = 50,
         include_metrics: bool = True,
-        branch: Optional[str] = None,
+        branch: str = "",
         cache_strategy: str = "shared",
     ) -> dict:
         """
@@ -545,14 +483,19 @@ NOTE: This tool is designed to guide initial codebase exploration by identifying
 
             analyzer = CodeComplexityAnalyzer(repo_manager, repo_map_builder)
 
+            # Convert empty lists to None for backend compatibility
+            files_list = files if files else None
+            directories_list = directories if directories else None
+            branch_opt = branch or None
+
             # Delegate to the specialized CodeComplexityAnalyzer module
             return await analyzer.analyze_repo_critical_files(
                 repo_path=repo_path,
-                files=files,
-                directories=directories,
+                files=files_list,
+                directories=directories_list,
                 limit=limit,
                 include_metrics=include_metrics,
-                branch=branch,
+                branch=branch_opt,
                 cache_strategy=cache_strategy,
             )
         except Exception as e:
@@ -564,17 +507,10 @@ NOTE: This tool is designed to guide initial codebase exploration by identifying
                 "error": f"An unexpected error occurred: {str(e)}",
             }
 
-    @mcp_server.tool(
-        name="get_repo_documentation",
-        description="""Retrieve and analyze documentation files from a repository, including README files, API docs, design documents, and other documentation. Repository must be previously cloned via clone_repo.
-
-REQUIRED PARAMETER GUIDANCE:
-- repo_path: MUST match the exact format of the original input to clone_repo
-  - If you cloned using a GitHub URL (e.g., 'https://github.com/username/repo'), you MUST use that identical URL here
-  - If you cloned using a local directory path, you MUST use that identical local path here
-  - Mismatched formats will result in 'Repository not found in cache' errors""",
-    )
-    async def get_repo_documentation(repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared") -> dict:
+    @mcp_server.tool(name="get_repo_documentation")
+    async def get_repo_documentation(
+        repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared"
+    ) -> dict:
         """
         Retrieve and analyze repository documentation files.
 
@@ -618,7 +554,9 @@ REQUIRED PARAMETER GUIDANCE:
         """
         try:
             # Call documentation backend module (thin endpoint)
-            return await get_repository_documentation(repo_path, branch=branch, cache_strategy=cache_strategy)
+            return await get_repository_documentation(
+                repo_path, branch=branch, cache_strategy=cache_strategy
+            )
         except Exception as e:
             logger.error(
                 f"Error retrieving repository documentation: {e}", exc_info=True
@@ -634,6 +572,7 @@ server = create_mcp_server()
 
 
 @click.command()
+@click.version_option(package_name="code-understanding-mcp-server")
 @click.option("--port", default=3001, help="Port to listen on for SSE")
 @click.option(
     "--transport",
@@ -666,7 +605,7 @@ def main(
 
         # Create server with command line overrides
         config = load_config(overrides=overrides)
-        
+
         global server
         server = create_mcp_server(config)
 

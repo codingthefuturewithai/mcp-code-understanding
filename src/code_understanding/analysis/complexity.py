@@ -1,24 +1,30 @@
-import logging
-import lizard
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-import os
 import asyncio
 import concurrent.futures
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import lizard
 
 logger = logging.getLogger("code_understanding.analysis.complexity")
 
 
-def _run_lizard_analysis(valid_files: List[str], num_threads: int) -> List[lizard.FileInformation]:
+def _run_lizard_analysis(
+    valid_files: List[str], num_threads: int
+) -> List[lizard.FileInformation]:
     """
     Helper function to run lizard analysis in a separate process.
     This prevents the synchronous, multi-threaded CPU-bound task from
     blocking the main asyncio event loop of the server.
     """
-    logger.debug(f"Running lizard analysis on {len(valid_files)} files with {num_threads} threads in a separate process.")
+    logger.debug(
+        f"Running lizard analysis on {len(valid_files)} files with {num_threads} threads in a separate process."
+    )
     # lizard.analyze_files returns an iterator, so we convert it to a list
     # to ensure the analysis is complete before returning from the process.
     return list(lizard.analyze_files(valid_files, threads=num_threads))
+
 
 class CodeComplexityAnalyzer:
     def __init__(self, repo_manager, repo_map_builder):
@@ -32,6 +38,8 @@ class CodeComplexityAnalyzer:
         directories: Optional[List[str]] = None,
         limit: int = 50,
         include_metrics: bool = True,
+        branch: Optional[str] = None,
+        cache_strategy: str = "shared",
     ) -> Dict[str, Any]:
         """
         Analyze repository to identify critical files based on complexity metrics.
@@ -42,6 +50,8 @@ class CodeComplexityAnalyzer:
             directories: Optional list of specific directories to analyze
             limit: Maximum number of files to return (default: 50)
             include_metrics: Include detailed metrics in response (default: True)
+            branch: Optional branch to analyze (defaults to current branch)
+            cache_strategy: Cache strategy to use ("shared" or "per-branch")
 
         Returns:
             dict: Response with analysis results or error information
@@ -53,7 +63,14 @@ class CodeComplexityAnalyzer:
             # Calculate cache path directly instead of using get_repository
             from ..repository.path_utils import get_cache_path
 
-            cache_path = get_cache_path(self.repo_manager.cache_dir, repo_path)
+            # Resolve cache path consistent with server conventions.
+            # Only include branch in the cache path if the strategy is per-branch.
+            cache_path = get_cache_path(
+                self.repo_manager.cache_dir,
+                repo_path,
+                branch if cache_strategy == "per-branch" else None,
+                per_branch=(cache_strategy == "per-branch"),
+            )
 
             # Check if repository exists in the filesystem
             if not cache_path.exists():
@@ -79,22 +96,24 @@ class CodeComplexityAnalyzer:
                 metadata = metadata_dict[cache_path_str]
                 clone_status = metadata.clone_status
                 if not clone_status or clone_status["status"] != "complete":
-                    logger.info(
-                        f"Repository clone is not complete: {repo_path}, status: {clone_status['status'] if clone_status else 'not_started'}"
+                    status_label = (
+                        clone_status["status"] if clone_status else "not_started"
                     )
-                    if clone_status and clone_status["status"] in [
+                    logger.info(
+                        f"Repository clone is not complete: {repo_path}, status: {status_label}"
+                    )
+                    if clone_status and clone_status["status"] in (
                         "cloning",
                         "copying",
-                    ]:
+                    ):
                         return {
                             "status": "waiting",
-                            "message": f"Repository clone is in progress. Please try again later.",
+                            "message": "Repository clone is in progress. Please try again later.",
                         }
-                    else:
-                        return {
-                            "status": "error",
-                            "error": f"Repository has not been cloned. Please clone it first using clone_repo with URL: {repo_path}",
-                        }
+                    return {
+                        "status": "error",
+                        "error": f"Repository has not been cloned. Please clone it first using clone_repo with URL: {repo_path}",
+                    }
 
             # Log success
             logger.debug(f"Repository validation successful for {repo_path}")
@@ -199,11 +218,10 @@ class CodeComplexityAnalyzer:
                     pool, _run_lizard_analysis, valid_files, num_threads
                 )
 
-
             # NOTE: Lizard will silently skip files that it cannot process (no parser available)
             # or files that don't contain any functions. These will not appear in the returned
             # file_analyses, and there's no direct way to determine which files were skipped.
-            
+
             # Process each file analysis
             for file_analysis in file_analyses:
                 try:

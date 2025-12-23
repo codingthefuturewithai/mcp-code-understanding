@@ -2,18 +2,19 @@
 Repository documentation discovery functionality.
 """
 
-import os
 import json
 import logging
-from pathlib import Path
-from typing import Dict, List, Any
-from identify import identify
+import os
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from identify import identify
 
 from ..config import load_config
-from .path_utils import get_cache_path
-from .manager import RepositoryManager
 from ..repository.file_filtering import RepoFilter
+from .manager import RepositoryManager
+from .path_utils import get_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -137,37 +138,45 @@ def calculate_stats(doc_files) -> Dict[str, Any]:
     }
 
 
-async def get_repository_documentation(repo_path: str) -> Dict[str, Any]:
+async def get_repository_documentation(
+    repo_path: str, branch: Optional[str] = None, cache_strategy: str = "shared"
+) -> Dict[str, Any]:
     """
     Discover documentation files in a repository.
 
     Args:
         repo_path: Path or URL provided by the user (could be GitHub URL or local path)
+        branch: Optional branch to analyze (defaults to current branch)
+        cache_strategy: Cache strategy to use ("shared" or "per-branch")
 
     Returns:
         Dictionary with documentation files, categories, and stats
     """
-    # Load configuration
+    # Load configuration and resolve cache path consistently with server logic
     config = load_config()
-
-    # Convert repo_path to absolute cache path using the standard utility
     cache_dir = config.repository.get_cache_dir_path()
-    cache_path = str(get_cache_path(cache_dir, repo_path).resolve())
+    cache_path = str(
+        get_cache_path(
+            cache_dir,
+            repo_path,
+            branch if cache_strategy == "per-branch" else None,
+            per_branch=(cache_strategy == "per-branch"),
+        ).resolve()
+    )
 
-    # Validate repository exists
-    if not os.path.exists(cache_path) or not os.path.isdir(cache_path):
-        return {
-            "status": "error",
-            "message": f"Repository path '{repo_path}' does not exist or is not a directory",
-        }
-
-    # We need to use RepositoryManager to access cache and metadata properly
+    # Use RepositoryManager/metadata for readiness instead of failing early on filesystem
     repo_manager = RepositoryManager(config.repository)
 
     # Check repository status in metadata using the cache's methods
     with repo_manager.cache._file_lock():
         metadata_dict = repo_manager.cache._read_metadata()
         if cache_path not in metadata_dict:
+            # If the folder exists but metadata not yet written, surface waiting
+            if os.path.isdir(cache_path):
+                return {
+                    "status": "waiting",
+                    "message": "Repository cache exists but metadata not initialized. Please try again shortly.",
+                }
             return {
                 "status": "error",
                 "message": f"No repository found at '{repo_path}' in metadata",
@@ -176,16 +185,15 @@ async def get_repository_documentation(repo_path: str) -> Dict[str, Any]:
         metadata = metadata_dict[cache_path]
         clone_status = metadata.clone_status
         if not clone_status or clone_status.get("status") != "complete":
-            if clone_status and clone_status.get("status") in ["cloning", "copying"]:
+            if clone_status and clone_status.get("status") in ("cloning", "copying"):
                 return {
                     "status": "waiting",
                     "message": "Repository clone is in progress. Please try again later.",
                 }
-            else:
-                return {
-                    "status": "error",
-                    "message": "Repository has not been cloned properly.",
-                }
+            return {
+                "status": "error",
+                "message": "Repository has not been cloned properly.",
+            }
 
     # Find documentation files
     try:

@@ -23,36 +23,70 @@ If not installed, guide them to install it:
 curl -sSf https://astral.sh/uv/install.sh | sh
 
 # Windows PowerShell
-ipow https://astral.sh/uv/install.ps1 | iex
+irm https://astral.sh/uv/install.ps1 | iex
 ```
 
 ### Step 2: Install the MCP Server
 
-Use the isolated tool installation method:
+Preferred quick start using `uvx` (no global install):
 
 ```bash
-uv tool install code-understanding-mcp-server
+uvx code-understanding-mcp-server --help
+```
+
+Optional persistent install in a dedicated virtual environment:
+
+```bash
+# Create and activate a virtual environment
+uv venv ~/.venvs/mcp-code-understanding
+source ~/.venvs/mcp-code-understanding/bin/activate
+
+# Install the package
+uv pip install code-understanding-mcp-server
+
+# Verify it runs
+code-understanding-mcp-server --help
 ```
 
 ### Step 3: Verify Installation
 
-Find the installed binary location:
+Depending on the method used:
 
 ```bash
-which code-understanding-mcp-server
-```
+# If using uvx (no persistent binary)
+uvx --version
 
-Expected output example: `/Users/username/.local/bin/code-understanding-mcp-server`
+# If using the virtual environment install
+which code-understanding-mcp-server
+# Expected example: /Users/username/.venvs/mcp-code-understanding/bin/code-understanding-mcp-server
+```
 
 ### Step 4: Configure MCP Client
 
-Help the user configure their MCP client with the verified binary path:
+Help the user configure their MCP client. Recommend `uvx` for simplicity, or a direct venv path if installed into a venv.
 
 ```json
 {
   "mcpServers": {
     "code-understanding": {
-      "command": "/path/to/code-understanding-mcp-server",
+      "command": "uvx",
+      "args": [
+        "code-understanding-mcp-server"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "your-github-token-here"
+      }
+    }
+  }
+}
+
+If using a virtual environment install instead of `uvx`, point directly to the binary path:
+
+```json
+{
+  "mcpServers": {
+    "code-understanding": {
+      "command": "/Users/username/.venvs/mcp-code-understanding/bin/code-understanding-mcp-server",
       "args": [],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "your-github-token-here"
@@ -61,20 +95,21 @@ Help the user configure their MCP client with the verified binary path:
   }
 }
 ```
+```
 
 ### Important Notes
 
-1. **Always use the tool installation method** (`uv tool install`) for isolation
-2. **Avoid uvx for production use** - it may have dependency conflicts
-3. **Use absolute paths** in the MCP configuration
-4. **Windows is not supported** - inform Windows users that support is planned
+1. **Recommended**: Use `uvx` for simple, isolated execution without a persistent install
+2. **Optional**: Use a dedicated virtual environment for a persistent binary path
+3. **Use absolute paths** when referencing a venv binary in configuration
+4. **Windows is unverified** - inform Windows users that it has not been tested yet
 
 ### Troubleshooting Common Issues
 
 If the user encounters issues:
 
-1. **Binary not found**: Check `~/.local/bin` is in PATH
-2. **Dependency conflicts**: Ensure they used `uv tool install`, not `uvx`
+1. **Binary not found (venv method)**: Confirm the venv is activated or use the absolute venv path
+2. **Dependency conflicts (uvx method)**: Switch to the virtual environment installation
 3. **Permission errors**: Verify write access to cache directories
 
 ## Example User Interaction
