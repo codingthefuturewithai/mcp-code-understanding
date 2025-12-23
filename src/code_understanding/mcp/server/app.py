@@ -153,10 +153,22 @@ def register_tools(
         """
         Update a previously cloned repository in MCP's cache and refresh its analysis.
 
+        CRITICAL: Cached repositories become stale over time. ALWAYS refresh before analysis
+        to ensure you're working with the latest code. Failure to refresh means your analysis
+        may be based on outdated code that could be days, weeks, or months old.
+
         For Git repositories, performs a git pull to get latest changes.
         For local directories, copies the latest content from the source.
         Then triggers a new repository map build to ensure all analysis is based on
         the updated code.
+
+        RECOMMENDED WORKFLOW:
+            1. Check if repository is cached: list_cached_repository_branches(url)
+            2. If cached, ALWAYS refresh first: refresh_repo(url)
+            3. Wait a moment for refresh to complete
+            4. Then perform analysis: get_source_repo_map(url, ...)
+
+            This ensures your analysis reflects current code, not stale cached data.
 
         Args:
             repo_path (str): Path or URL matching what was originally provided to clone_repo
@@ -199,7 +211,11 @@ def register_tools(
     @mcp_server.tool(name="list_cached_repository_branches")
     async def list_cached_repository_branches(repo_url: str) -> dict:
         """
-        List all cached versions of a repository across different branches.
+        Check if a repository is already cached and list all cached branch versions.
+
+        USE THIS FIRST before calling clone_repo to avoid redundant clone attempts.
+        If the repository is already cached, you can proceed directly to refresh_repo
+        and analysis instead of cloning again.
 
         This tool scans the MCP cache to find all entries for a given repository URL,
         showing both shared and per-branch cache entries. Useful for understanding
@@ -213,7 +229,7 @@ def register_tools(
                 {
                     "status": "success" | "error",
                     "repo_url": str,  # Repository URL searched
-                    "cached_branches": [  # List of cached branch entries
+                    "cached_branches": [  # List of cached branch entries (empty if not cached)
                         {
                             "requested_branch": str,  # Branch that was requested during clone
                             "current_branch": str,    # Current active branch in the cache
@@ -224,11 +240,22 @@ def register_tools(
                             "repo_map_status": dict   # Repository map build status
                         }
                     ],
-                    "total_cached": int  # Total number of cached entries found
+                    "total_cached": int  # Total number of cached entries (0 if not cached)
                 }
+
+        Typical Workflow:
+            1. Check cache first: result = list_cached_repository_branches(url)
+            2. If result["total_cached"] > 0:
+               - Repository is cached, skip clone
+               - Use refresh_repo(url) to update cached code
+            3. If result["total_cached"] == 0:
+               - Repository not cached yet
+               - Use list_remote_branches(url) to discover branch names
+               - Use clone_repo(url, branch=correct_branch)
 
         Note:
             - Only returns repositories that have been cloned via clone_repo
+            - Empty cached_branches list means repository is NOT cached
             - Useful for PR review workflows to see all available branch versions
             - Shows both active and completed cache entries
             - Helps identify which cache strategy was used for each entry
@@ -254,7 +281,47 @@ def register_tools(
 
     @mcp_server.tool(name="list_remote_branches")
     async def list_remote_branches(repo_url: str) -> dict:
-        """Surface remote branches using git ls-remote --heads."""
+        """
+        Discover all available branches in a remote repository without cloning.
+
+        CRITICAL USE CASE: Many repositories use "master", "develop", or other names instead
+        of "main" as their default branch. Use this tool BEFORE clone_repo to discover the
+        actual default branch name and avoid clone failures.
+
+        This tool uses git ls-remote --heads to query the remote repository, which is fast
+        and does not require cloning the entire repository.
+
+        Args:
+            repo_url (str): Remote repository URL (e.g., https://github.com/user/repo)
+
+        Returns:
+            dict: Response with format:
+                {
+                    "status": "success" | "error",
+                    "repo_url": str,  # Repository URL queried
+                    "remote_branches": [str],  # List of branch names (e.g., ["main", "develop", "feature-x"])
+                    "total_remote": int,  # Total number of branches found
+                    "error": str  # (Only on error) Error message
+                }
+
+        Common Default Branch Names to Look For:
+            - "main" (modern GitHub default)
+            - "master" (traditional Git default)
+            - "develop" or "development" (common for dev workflows)
+            - Check repository documentation if unclear
+
+        Typical Workflow:
+            1. Discover branches: branches = list_remote_branches(url)
+            2. Identify default branch from branches["remote_branches"]
+               - Look for "main", "master", or "develop"
+               - If unsure, check the repository's web page
+            3. Clone with correct branch: clone_repo(url, branch=identified_branch)
+
+        Note:
+            - Fast operation, does not clone the repository
+            - Requires network access to the remote repository
+            - Works with any Git repository (GitHub, GitLab, Bitbucket, etc.)
+        """
         try:
             return await repo_manager.list_remote_branches(repo_url)
         except Exception as e:
@@ -272,9 +339,23 @@ def register_tools(
         or get_repo_documentation. It copies the repository into MCP's cache and
         automatically starts building a repository map in the background.
 
+        IMPORTANT - BEFORE CLONING:
+            1. CHECK IF ALREADY CACHED: Use list_cached_repository_branches(url) first to avoid
+               redundant clone attempts. Returns empty list if not cached, or existing branches if cached.
+
+            2. VERIFY DEFAULT BRANCH NAME: Many repositories use "master", "develop", or other names
+               instead of "main". If branch is not specified and clone fails:
+               - Use list_remote_branches(url) to discover available branches
+               - Look for "main", "master", "develop", or check repo documentation
+               - Explicitly specify the correct branch parameter
+
+            3. AFTER CLONING: The cached repository can become stale over time. Before analysis,
+               consider using refresh_repo() to ensure you're working with the latest code.
+
         Args:
             url (str): URL of remote repository or path to local repository to analyze
-            branch (str, optional): Specific branch to clone for analysis
+            branch (str, optional): Specific branch to clone for analysis. Defaults to "main" if not
+                specified, but many repositories use "master" or other names - verify first!
             cache_strategy (str, optional): Cache strategy - "shared" (default) or "per-branch"
                 - "shared": One cache entry per repo, switch branches in place
                 - "per-branch": Separate cache entries for each branch (useful for PR reviews)
@@ -289,6 +370,13 @@ def register_tools(
                     "current_branch": str,  # (if applicable) Current active branch
                     "previous_branch": str,  # (if switched) Previous branch name
                 }
+
+        Recommended Workflow:
+            1. Check cache: cached = list_cached_repository_branches(url)
+            2. If not cached, discover branches: branches = list_remote_branches(url)
+            3. Clone with correct branch: clone_repo(url, branch=discovered_branch)
+            4. Before analysis, refresh if needed: refresh_repo(url)
+            5. Perform analysis: get_source_repo_map(url, ...)
 
         Note:
             - This is a setup operation for MCP analysis only
