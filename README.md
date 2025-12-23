@@ -178,6 +178,29 @@ The MCP Code Understanding Server processes repositories through a series of ana
 
 AI assistants integrate with the server by making targeted requests for each analytical stage, building a comprehensive understanding of the codebase that can be used to address specific user questions and needs.
 
+### Recommended Workflow for AI Assistants
+
+When working with repositories, AI assistants should follow this workflow for optimal results:
+
+1. **Check Cache First**: Use `list_cached_repository_branches` to see if the repository is already cached
+   - If cached: Skip to step 3 (refresh)
+   - If not cached: Continue to step 2
+
+2. **Discover Branch Names**: Many repositories use "master", "develop", or other names instead of "main"
+   - Use `list_remote_branches` to discover available branches
+   - Identify the correct default branch before cloning
+
+3. **Refresh Before Analysis**: Cached repositories become stale over time
+   - Use `refresh_repo` to pull latest changes before any analysis
+   - This ensures analysis is based on current code, not outdated cache
+
+4. **Perform Analysis**: Once repository is current, use analysis tools
+   - `get_source_repo_map` for code structure
+   - `get_repo_critical_files` for identifying key components
+   - `get_repo_documentation` for documentation discovery
+
+This workflow prevents common issues like clone failures from incorrect branch names, redundant clone attempts, and analysis based on stale cached data.
+
 ## Design Considerations for Large Codebases
 
 The server employs several strategies to maintain performance and usability even with enterprise-scale repositories:
